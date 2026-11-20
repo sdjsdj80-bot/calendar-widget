@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>캘린더 위젯</title>
+<meta name="description" content="아이폰과 같은 Google · iCloud 캘린더를 윈도우 바탕화면에 펼쳐 보는 작은 프로그램">
+<style>
+  :root {
+    --paper: #F6F8FB; --sheet: #FFFFFF; --ink: #1D2738; --muted: #586378;
+    --rule: #DCE2EC; --blue: #1C6FD1; --red: #D63A3A;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121826; --sheet: #1A2234; --ink: #E7ECF5; --muted: #9AA5B8;
+      --rule: #2B3548; --blue: #79AEFF; --red: #FF6B6B;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", "Pretendard", system-ui, sans-serif;
+    font-size: 17px; line-height: 1.7; word-break: keep-all; overflow-wrap: anywhere;
+  }
+  main { max-width: 680px; margin: 0 auto; padding: 56px 24px 72px; }
+  a { color: var(--blue); text-underline-offset: 3px; }
+  a:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 2px; }
+
+  .hero { display: flex; gap: 28px; align-items: center; margin-bottom: 40px; }
+  .sheet {
+    flex: none; width: 112px; border-radius: 10px; overflow: hidden; background: var(--sheet);
+    box-shadow: 0 1px 0 var(--rule), 0 10px 24px -14px rgba(20, 30, 50, .45);
+    text-align: center; font-variant-numeric: tabular-nums;
+  }
+  .sheet .month { background: var(--red); color: #fff; font-size: 15px; font-weight: 700; padding: 6px 0 5px; }
+  .sheet .day {
+    font-family: "Bahnschrift", "DIN Alternate", "Segoe UI", system-ui, sans-serif;
+    font-size: 56px; font-weight: 600; line-height: 1; padding: 12px 0 2px; letter-spacing: -1px;
+  }
+  .sheet .weekday { color: var(--muted); font-size: 14px; padding-bottom: 10px; }
+  h1 { font-size: 34px; line-height: 1.25; margin: 0 0 8px; letter-spacing: -0.5px; }
+  .lead { margin: 0; color: var(--muted); font-size: 18px; }
+
+  h2 { font-size: 20px; margin: 40px 0 8px; }
+  p { margin: 0 0 12px; }
+  ul { margin: 0 0 12px; padding-left: 1.2em; }
+  li { margin: 4px 0; }
+  .note { border-left: 3px solid var(--blue); padding: 4px 0 4px 16px; color: var(--muted); }
+  footer { border-top: 1px solid var(--rule); margin-top: 48px; padding-top: 20px; color: var(--muted); font-size: 15px; }
+  footer nav { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 6px; }
+
+  @media (max-width: 520px) {
+    main { padding-top: 36px; }
+    .hero { gap: 18px; }
+    .sheet { width: 88px; }
+    .sheet .day { font-size: 44px; }
+    h1 { font-size: 27px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header class="hero">
+    <div class="sheet" aria-hidden="true">
+      <div class="month" id="m">11월</div>
+      <div class="day" id="d">20</div>
+      <div class="weekday" id="w">금요일</div>
+    </div>
+    <div>
+      <h1>캘린더 위젯</h1>
+      <p class="lead">아이폰과 같은 캘린더를 윈도우 바탕화면에 펼쳐 보는 작은 프로그램이에요.</p>
+    </div>
+  </header>
+
+  <h2>무엇을 하나요</h2>
+  <p>아이폰 캘린더에 쓰는 Google 캘린더와 iCloud 캘린더를 윈도우 바탕화면에 크게 보여 줘요. 위젯에서 일정을 넣으면 아이폰 캘린더에도 함께 나타나요.</p>
+  <ul>
+    <li>여러 주를 한눈에 보는 달력과 하루 시간표</li>
+    <li>날짜와 색을 정할 수 있는 할 일 목록 (D-3, D-day처럼 표시)</li>
+    <li>한글 · PDF · 엑셀로 받은 학사일정 파일을 읽어 캘린더에 한꺼번에 넣기</li>
+    <li>일정 시작 전 알림과 컴퓨터를 켤 때 보는 오늘 요약</li>
+  </ul>
+
+  <h2>Google 계정 정보는 이렇게 다뤄요</h2>
+  <p>Google 계정으로 로그인하면 위젯은 내 Google 캘린더의 일정을 읽어 화면에 보여 주고, 내가 위젯에서 추가한 일정을 내 캘린더에 저장해요. 정보는 내 컴퓨터와 Google 사이에서만 오가며, 개발자의 서버나 다른 곳으로 보내지 않아요.</p>
+  <p class="note">자세한 내용은 <a href="privacy.html">개인정보처리방침</a>에 있어요.</p>
+
+  <h2>누가 만들었나요</h2>
+  <p>학교 업무와 개인 일정을 한 화면에서 보려고 만든 개인 프로그램이에요. 판매하거나 광고를 넣지 않아요.</p>
+
+  <footer>
+    <nav aria-label="문서">
+      <a href="privacy.html">개인정보처리방침</a>
+      <a href="terms.html">이용약관</a>
+      <a href="mailto:sdjsdj80@gmail.com">문의: sdjsdj80@gmail.com</a>
+    </nav>
+  </footer>
+</main>
+<script>
+  (function () {
+    var now = new Date(), days = ["일", "월", "화", "수", "목", "금", "토"];
+    document.getElementById("m").textContent = (now.getMonth() + 1) + "월";
+    document.getElementById("d").textContent = now.getDate();
+    document.getElementById("w").textContent = days[now.getDay()] + "요일";
+  })();
+</script>
+</body>
+</html>
