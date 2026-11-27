@@ -1,0 +1,10 @@
+requests>=2.31,<3
+icalendar>=7.3,<8
+recurring-ical-events>=3.8,<4
+tzdata>=2024.1
+truststore>=0.10
+korean-lunar-calendar>=0.3
+pypdf>=5.0
+openpyxl>=3.1
+olefile>=0.46
+tkinterdnd2>=0.4
