@@ -1,0 +1,105 @@
+# 릴리스를 만들면 설치 파일을 자동으로 만들어서 그 릴리스에 붙여요.
+# 필요한 비밀 값 (Settings → Secrets and variables → Actions):
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET  — Google Cloud에서 만든 '데스크톱 앱' OAuth 클라이언트
+name: 설치 파일 만들기
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "설치 파일을 붙일 릴리스 태그 (예: v2.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: 버전과 Google 로그인 정보 넣기
+        shell: pwsh
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          $version = $env:TAG.TrimStart('v', 'V')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "태그는 v2.0.0 처럼 만들어 주세요 (지금: $env:TAG)" }
+          if (-not $env:GOOGLE_CLIENT_ID) { Write-Warning "GOOGLE_CLIENT_ID 비밀 값이 없어서 Google 로그인 없이 만들어요." }
+          $lines = @(
+            "VERSION = '$version'",
+            "GOOGLE_CLIENT_ID = '$env:GOOGLE_CLIENT_ID'",
+            "GOOGLE_CLIENT_SECRET = '$env:GOOGLE_CLIENT_SECRET'",
+            "UPDATE_REPO = '${{ github.repository }}'"
+          )
+          Set-Content -Path build_info.py -Value $lines -Encoding utf8
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 필요한 패키지 설치
+        run: python -m pip install --disable-pip-version-check -r requirements.txt pyinstaller
+
+      - name: 자체 시험
+        run: python calendar_widget.py --selftest
+
+      - name: 프로그램 만들기 (PyInstaller)
+        run: python -m PyInstaller --noconfirm --clean --windowed --name CalendarWidget --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "assets/fonts;assets/fonts" --collect-data tzdata --collect-all tkinterdnd2 calendar_widget.py
+
+      - name: Inno Setup 준비
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            # 없으면 Inno Setup 공식 저장소(jrsoftware/issrc)에서 6.7.4를 받아 설치해요
+            $setup = Join-Path $env:RUNNER_TEMP "innosetup-6.7.4.exe"
+            Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe" -OutFile $setup
+            Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/ALLUSERS" -Wait
+            $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "Inno Setup을 찾지 못했어요" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 설치 파일 만들기
+        shell: pwsh
+        run: |
+          & $env:ISCC "/DMyAppVersion=$env:VERSION" installer\CalendarWidget.iss
+          if ($LASTEXITCODE -ne 0) { throw "설치 파일을 만들지 못했어요" }
+          $name = "CalendarWidget-Setup-$env:VERSION.exe"
+          $hash = (Get-FileHash "installer\Output\$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content -Path "installer\Output\$name.sha256" -Encoding ascii
+          $info = [ordered]@{
+            version   = $env:VERSION
+            tag       = $env:TAG
+            installer = $name
+            sha256    = $hash
+            url       = "https://github.com/${{ github.repository }}/releases/download/$env:TAG/$name"
+            page      = "https://github.com/${{ github.repository }}/releases/tag/$env:TAG"
+          }
+          $info | ConvertTo-Json | Set-Content -Path installer\Output\latest.json -Encoding utf8
+
+      - name: 릴리스에 올리기
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = "CalendarWidget-Setup-$env:VERSION.exe"
+          gh release upload $env:TAG "installer\Output\$name" "installer\Output\$name.sha256" --clobber
+          # 위젯은 latest.json을 보고 업데이트해요. 설치 파일을 다 올린 뒤에 마지막으로 올려요.
+          gh release upload $env:TAG installer\Output\latest.json --clobber
