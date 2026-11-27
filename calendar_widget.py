@@ -249,6 +249,7 @@ DEFAULTS = {
     "todo_tasks": False,         # 할 일을 Google Tasks와 맞춰요 (하위 할 일 · 체크로 끝내기)
     "todo_tasks_list": "@default",
     "todo_rollover": True,       # 끝내지 못한 할 일은 달력에서 오늘로 넘겨 보여 줘요
+    "todo_mirror": "",           # Tasks를 쓸 때 날짜 있는 할 일을 복사해 둘 캘린더 (아이폰 기본 캘린더에서 보이게)
     "last_calendar": "",         # 일정 추가 창에서 마지막에 고른 캘린더 ('__todo__'는 할 일)
     "cal_order": [],             # 위 막대 캘린더 단추 순서 (Alt를 누른 채 끌어서 바꿔요)
     "removed_cals": [],          # '목록에서 숨기기'를 한 캘린더 (단추도 일정도 안 보여요)       # 끝낸 할 일: strike(취소줄로 계속) | today(오늘까지만) | hide(바로 숨기기)
@@ -2123,6 +2124,42 @@ class CalendarService:
             raise SyncError("Google 계정으로 로그인해야 캘린더를 지울 수 있어요.")
         api.delete_calendar(calendar_id)
 
+    def mirror_todos(self, calendar_id: str, items: list) -> dict:
+        """끝내지 않은 날짜 있는 할 일을 캘린더에 일정으로 복사해요. 위젯이 만든 일정만 고치고 지워요."""
+        api = self._google_api()
+        if api is None:
+            raise SyncError("Google 계정으로 로그인해야 아이폰 캘린더에 할 일을 보여 줄 수 있어요.")
+        today = date.today()
+        raw = api.events(calendar_id, local_midnight(today - timedelta(days=120)).astimezone(timezone.utc),
+                         local_midnight(today + timedelta(days=550)).astimezone(timezone.utc))
+        cal = RemoteCalendar("", calendar_id, "#000000", True, "Google")
+        have: dict = {}
+        for r in raw:
+            ev = google_api_event(r, cal, False)
+            if ev and ev.ref.get("todo_id") and not ev.ref.get("recurring"):
+                have.setdefault(ev.ref["todo_id"], []).append(ev)
+        made = changed = removed = 0
+        for item in items:
+            evs = have.pop(item["id"], [])
+            if not evs:
+                api.insert_event(calendar_id, todo_event_body(item, creating=True, note=MIRROR_NOTE))
+                made += 1
+                continue
+            ev = evs[0]
+            now = {**todo_remote_state(ev), "end": "" if ev.all_day else f"{ev.end:%H:%M}",
+                   "color": ev.ref.get("event_color", "")}
+            if now != mirror_expected(item):
+                api.patch_event(calendar_id, ev.ref["event_id"], todo_event_body(item, creating=False, note=MIRROR_NOTE))
+                changed += 1
+            for extra in evs[1:]:
+                api.delete_event(calendar_id, extra.ref["event_id"])
+                removed += 1
+        for evs in have.values():  # 끝냈거나 지운 할 일의 복사본
+            for ev in evs:
+                api.delete_event(calendar_id, ev.ref["event_id"])
+                removed += 1
+        return {"made": made, "changed": changed, "removed": removed}
+
     # ── Google Tasks ──
     def _tasks_api(self):
         api = self._google_api()
@@ -3252,7 +3289,7 @@ def todo_remote_state(ev: "Event") -> dict:
     return {"title": ev.title, "due": day.isoformat(), "time": "" if ev.all_day else f"{ev.start:%H:%M}"}
 
 
-def todo_event_body(item: dict, creating: bool) -> dict:
+def todo_event_body(item: dict, creating: bool, note: str | None = None) -> dict:
     """날짜 있는 할 일을 Google 일정 내용으로 바꿔요. 시간이 있으면 30분짜리, 없으면 종일 일정이에요."""
     lines = (item.get("text") or "").splitlines() or [""]
     due = date.fromisoformat(item["due"])
@@ -3264,7 +3301,7 @@ def todo_event_body(item: dict, creating: bool) -> dict:
         when = {"start": {"dateTime": start.isoformat()}, "end": {"dateTime": stop.isoformat()}}
     else:
         when = {"start": {"date": due.isoformat()}, "end": {"date": (due + timedelta(days=1)).isoformat()}}
-    note = "캘린더 위젯의 할 일이에요. 여기서 지우면 위젯에서 끝낸 할 일이 돼요."
+    note = note or "캘린더 위젯의 할 일이에요. 여기서 지우면 위젯에서 끝낸 할 일이 돼요."
     atts = [a for a in item.get("attachments") or [] if a.get("fileUrl")]
     block = attachment_block(atts)
     body = {"summary": lines[0], "description": "\n".join(lines[1:] + ([""] if len(lines) > 1 else []) +
@@ -3283,6 +3320,20 @@ def todo_event_body(item: dict, creating: bool) -> dict:
         private["widgetColor"] = None
     body["extendedProperties"] = {"private": private}
     return body
+
+
+MIRROR_NOTE = ("Google Tasks의 할 일을 아이폰 기본 캘린더에서 보이게 복사한 일정이에요. 여기서 고치거나 지워도 위젯이 "
+               "다시 맞춰 놓아요. 끝내거나 고치는 건 위젯이나 Google Tasks 앱에서 해 주세요.")
+
+
+def mirror_expected(item: dict) -> dict:
+    """복사본 일정이 가져야 할 모습 (비교용)"""
+    at, until = parse_time(str(item.get("time") or "")), parse_time(str(item.get("end_time") or ""))
+    end = ""
+    if at:
+        stop = until if until and until > at else (datetime.combine(date.today(), at) + timedelta(minutes=30)).time()
+        end = f"{stop.hour:02d}:{stop.minute:02d}"
+    return {**todo_signature(item), "end": end, "color": todo_hex(item.get("color", ""))}
 
 
 def todo_due_label(item: dict, today: date) -> tuple[str, str] | None:
@@ -3885,10 +3936,18 @@ class App(tk.Tk):
 
     SCHOOL_WORDS = re.compile(r"학교|학사|직장|회사|업무|교무|근무|work|school|office", re.I)
 
+    def todo_cal_keys(self) -> set:
+        """할 일을 담는 캘린더 (할 일 맞추기 캘린더, Tasks를 아이폰에 보여 주는 복사본 캘린더)"""
+        keys = {self.cfg.get("todo_sync") or ""}
+        if self.tasks_mode():
+            keys.add(self.cfg.get("todo_mirror") or "")
+        keys.discard("")
+        return keys
+
     def event_calendars(self) -> list:
         """일정을 넣을 수 있는 캘린더 (할 일 캘린더는 빼요: 거기 넣은 일정은 할 일이 되니까요)"""
         removed = set(self.cfg.get("removed_cals") or [])
-        return [c for c in self.writable_calendars() if c.key != self.cfg.get("todo_sync") and c.key not in removed]
+        return [c for c in self.writable_calendars() if c.key not in self.todo_cal_keys() and c.key not in removed]
 
     def slot_calendar(self, index: int, auto: bool = False) -> RemoteCalendar | None:
         """빠른 선택 버튼(0: 학사일정, 1: 개인)이 가리키는 캘린더. 정하지 않았으면 이름을 보고 짐작해요."""
@@ -4194,13 +4253,13 @@ class App(tk.Tk):
         removed = set(self.cfg.get("removed_cals") or [])  # '목록에서 숨기기'를 한 캘린더
         seen, out = set(), []
         for c in sorted(self.calendars, key=lambda c: (c.source != "Google", not c.primary, c.name)):
-            if c.key == self.cfg.get("todo_sync") or c.key in removed:
+            if c.key in self.todo_cal_keys() or c.key in removed:
                 continue  # 할 일 캘린더는 할 일로 보이고, 목록에서 숨긴 캘린더는 빼요
             if c.key not in seen:
                 seen.add(c.key)
                 out.append((c.key, c.name, colors.get(c.key, c.color)))
         for ev in self.events:
-            if ev.cal_key and ev.cal_key not in seen and ev.cal_key != self.cfg.get("todo_sync") and ev.cal_key not in removed:
+            if ev.cal_key and ev.cal_key not in seen and ev.cal_key not in self.todo_cal_keys() and ev.cal_key not in removed:
                 seen.add(ev.cal_key)
                 out.append((ev.cal_key, ev.cal_name or "캘린더", colors.get(ev.cal_key, ev.__dict__.get("_orig_color",
                                                                                                          ev.color))))
@@ -4855,8 +4914,7 @@ class App(tk.Tk):
     def _index_events(self) -> None:
         by_day, holidays, observances = {}, {}, {}
         hidden = set(self.cfg.get("hidden_cals") or []) | set(self.cfg.get("removed_cals") or [])
-        if self.cfg.get("todo_sync"):
-            hidden.add(self.cfg["todo_sync"])
+        hidden |= self.todo_cal_keys()  # 할 일로 보이는 캘린더는 일정으로 또 그리지 않아요
         colors = self.cfg.get("cal_colors") or {}
         shown = []
         for ev in self.events:
@@ -5059,6 +5117,10 @@ class App(tk.Tk):
             count = sum(1 for i in self.todos.items if not i.get("done") and i.get("task_id"))
             last = getattr(self, "_tasks_last", None)
             lists = ", ".join(tl["title"] for tl in getattr(self, "_tasks_lists", []) if tl.get("title")) or "아직 못 읽었어요"
+            mcal = self.mirror_cal()
+            if mcal is not None:
+                lists += f"\n아이폰 기본 캘린더: '{mcal.name}' 캘린더에 날짜 있는 할 일을 복사해 두고 있어요" + (
+                    f" (문제: {self._mirror_error})" if getattr(self, "_mirror_error", "") else "")
             if messagebox.askyesno(APP_TITLE, f"할 일 {count}개가 Google Tasks와 맞춰져 있어요. 하위 할 일과 날짜 없는 할 일도 "
                                               f"함께 맞춰져요.\n\n읽는 목록: {lists}\n마지막으로 맞춘 시각: "
                                               f"{fmt_time(last) if last else '아직 없어요'} (1분마다 확인해요)\n\n"
@@ -5099,6 +5161,7 @@ class App(tk.Tk):
     def _push_todo(self, item: dict) -> None:
         """할 일 하나를 Google 캘린더와 맞춰요. 끝냈거나 날짜가 없으면 일정을 지워요."""
         if self.tasks_mode():
+            self._mirror_soon()  # 아이폰 캘린더 복사본도 맞춰요
             return self._push_task(item)
         cal = self.todo_sync_cal()
         if cal is None:
@@ -5297,6 +5360,61 @@ class App(tk.Tk):
             self.refresh_summary()
             self.render_grid()
         self._render_todo_sync_status()
+        self._mirror_soon(500)
+
+    def mirror_cal(self) -> RemoteCalendar | None:
+        key = self.cfg.get("todo_mirror") or ""
+        if not key or not self.tasks_mode() or self.service._google_api() is None:
+            return None
+        return next((c for c in self.calendars if c.key == key and c.source == "Google" and c.writable), None)
+
+    def _mirror_soon(self, delay: int = 1500) -> None:
+        if self.mirror_cal() is None:
+            return
+        job = getattr(self, "_mirror_job", None)
+        if job:
+            self.after_cancel(job)
+        self._mirror_job = self.after(delay, self._mirror_todos)
+
+    def _mirror_todos(self) -> None:
+        self._mirror_job = None
+        cal = self.mirror_cal()
+        if cal is None:
+            return
+        if getattr(self, "_mirror_busy", False):
+            self._mirror_soon(3000)
+            return
+        self._mirror_busy = True
+        items = [json.loads(json.dumps(i)) for i in self.todos.items if not i.get("done") and i.get("due")]
+
+        def done(res, err) -> None:
+            self._mirror_busy = False
+            if err is not None:
+                self._mirror_error = str(err) if isinstance(err, SyncError) else "연결 문제"
+                log_error(f"아이폰 캘린더에 할 일 복사 실패: {err}")
+            else:
+                self._mirror_error = ""
+
+        self.worker.submit(self.service.mirror_todos, cal.url, items, callback=done)
+
+    def _mirror_changed(self, old_key: str, new_key: str) -> None:
+        old_cal = next((c for c in self.calendars if c.key == old_key), None)
+        if old_key and old_cal is not None:  # 예전 복사본은 정리해요 (할 일은 Tasks에 그대로 있어요)
+            self.worker.submit(self.service.mirror_todos, old_cal.url, [], callback=lambda r, e: None)
+        if new_key:
+            cal = next((c for c in self.calendars if c.key == new_key), None)
+            others = [ev for ev in self.events if ev.cal_key == new_key and not (ev.ref or {}).get("todo_id")]
+            if cal is not None and len(others) >= 5 and not messagebox.askyesno(
+                    APP_TITLE, f"'{cal.name}' 캘린더에는 이미 일정이 {len(others)}개 있어요.\n할 일을 보여 주는 캘린더로 쓰면 "
+                               "위젯 화면에서는 이 캘린더의 일정이 보이지 않아요. '할 일' 캘린더를 따로 쓰는 걸 권해요.\n\n"
+                               "그래도 이 캘린더를 쓸까요?", parent=self.host):
+                self.cfg["todo_mirror"] = old_key
+                self.save()
+                return
+            self._mirror_soon(200)
+            self.show_flash("할 일을 아이폰 캘린더에도 보이게 하고 있어요")
+        self._index_events()
+        self.render()
 
     def _tasks_mode_changed(self, on: bool) -> None:
         if on:
@@ -5523,10 +5641,19 @@ class App(tk.Tk):
         Tooltip(box, "다시 할 일로" if done else "끝냄으로 표시", self)
         col = tk.Frame(row, bg=bg)
         col.pack(side="left", fill="x", expand=True)
-        lbl = tk.Label(col, text=item["text"], font=f["event_done" if done else "event"], bg=bg,
+        lines = (item.get("text") or "").splitlines() or [""]
+        lbl = tk.Label(col, text=lines[0], font=f["event_done" if done else "event"], bg=bg,
                        fg=t["muted"] if done else t["text"], anchor="w", justify="left", wraplength=wrap)
         lbl.pack(fill="x")
         widgets += [col, lbl]
+        desc = "\n".join(lines[1:]).strip()
+        if desc:  # 설명은 제목 아래에 작은 검정 글씨로
+            note = tk.Label(col, text=desc, font=f["small"], bg=bg, fg=t["muted"] if done else t["text"],
+                            anchor="w", justify="left", wraplength=wrap)
+            note.pack(fill="x", pady=(px(1), 0))
+            widgets.append(note)
+            if not done:
+                note.bind("<Double-Button-1>", lambda e, it=item: self.open_todo(it))
         due = todo_due_label(item, self.today)
         files = len(item.get("attachments") or [])
         if due or files:
@@ -5871,6 +5998,10 @@ class App(tk.Tk):
 
     def apply_settings(self, old: dict) -> None:
         self.save()
+        old_mirror = (old.get("todo_mirror") or "") if old.get("todo_tasks") else ""
+        new_mirror = (self.cfg.get("todo_mirror") or "") if self.cfg.get("todo_tasks") else ""
+        if old_mirror != new_mirror:
+            self.after(400, lambda o=old_mirror, n=new_mirror: self._mirror_changed(o, n))
         if bool(old.get("todo_tasks")) != bool(self.cfg.get("todo_tasks")):
             self.after(300, lambda on=bool(self.cfg.get("todo_tasks")): self._tasks_mode_changed(on))
         if (old.get("todo_sync") or "") != (self.cfg.get("todo_sync") or ""):
@@ -6209,13 +6340,56 @@ class App(tk.Tk):
             cv.tag_bind(tag, "<Leave>", lambda e: cv.config(cursor=""))
 
     def _task_circle(self, cv, cx: float, cy: float, r: float, color: str, done: bool, bg: str, tags) -> None:
-        """Google 캘린더의 할 일처럼 동그란 완료 단추 (끝내면 채워지고 체크 표시)"""
-        if done:
-            cv.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="", tags=tags)
-            cv.create_line(cx - r * 0.45, cy + r * 0.02, cx - r * 0.1, cy + r * 0.38, cx + r * 0.5, cy - r * 0.38,
-                           fill=bg, width=max(1, self.px(1.5)), tags=tags)
-        else:
-            cv.create_oval(cx - r, cy - r, cx + r, cy + r, fill=bg, outline=color, width=max(1, self.px(1.6)), tags=tags)
+        """Google 캘린더의 할 일처럼 동그란 완료 단추 (끝내면 채워지고 흰 체크 표시). 가장자리가 부드러운 그림으로 그려요."""
+        size = max(9, int(round(r * 2 + 2)))
+        cv.create_image(int(round(cx)), int(round(cy)), image=self._task_icon(size, color, done, bg), tags=tags)
+
+    def _task_icon(self, size: int, color: str, done: bool, bg: str) -> tk.PhotoImage:
+        """동그라미(와 체크)를 4배 크기로 계산해서 줄인 그림. 같은 모양은 다시 쓰려고 기억해 둬요."""
+        key = (size, color, done, bg)
+        cache = self.__dict__.setdefault("_task_icons", {})
+        if key in cache:
+            return cache[key]
+        ss = 4
+        n = size * ss
+        cx = cy = n / 2
+        outer = n / 2 - ss * 0.6
+        ring = max(1.5, size * 0.12) * ss
+        check_w = max(1.5, size * 0.13) * ss
+        pts = [(0.28 * n, 0.53 * n), (0.44 * n, 0.68 * n), (0.73 * n, 0.36 * n)]
+        fg, back, white = hex_rgb(color), hex_rgb(bg), (255, 255, 255)
+
+        def near_check(x: float, y: float) -> bool:
+            for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+                dx, dy = x2 - x1, y2 - y1
+                t_ = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)))
+                if (x - x1 - t_ * dx) ** 2 + (y - y1 - t_ * dy) ** 2 <= (check_w / 2) ** 2:
+                    return True
+            return False
+
+        rows = []
+        for py in range(size):
+            row = []
+            for px_ in range(size):
+                acc = [0.0, 0.0, 0.0]
+                for sy in range(ss):
+                    for sx in range(ss):
+                        x, y = px_ * ss + sx + 0.5, py * ss + sy + 0.5
+                        d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+                        if done:
+                            c = (white if near_check(x, y) else fg) if d <= outer else back
+                        else:
+                            c = fg if outer - ring <= d <= outer else back
+                        acc[0] += c[0]
+                        acc[1] += c[1]
+                        acc[2] += c[2]
+                k = ss * ss
+                row.append("#%02x%02x%02x" % (round(acc[0] / k), round(acc[1] / k), round(acc[2] / k)))
+            rows.append("{" + " ".join(row) + "}")
+        img = tk.PhotoImage(master=self, width=size, height=size)
+        img.put(" ".join(rows))
+        cache[key] = img
+        return img
 
     def _next_tag(self) -> str:
         self._tag_n += 1
@@ -6629,6 +6803,25 @@ class SettingsDialog(_Dialog):
         self.hint("Google Tasks를 고르면 할 일과 하위 할 일이 Google Tasks 앱 · Google 캘린더 앱과 맞춰지고, 체크로 끝낼 수 있어요. "
                   "(시간은 Tasks 메모 끝에 '[시간] 15:30'으로 적어 둬요. 아이폰 기본 캘린더에는 보이지 않아요) "
                   "캘린더를 고르면 날짜 있는 할 일이 그 캘린더에 일정으로 들어가 아이폰 기본 캘린더에서 보여요.")
+        mirror_opts = [("", "쓰지 않음")] + [(c.key, f"'{c.name}' 캘린더에 복사") for c in app.writable_calendars()
+                                             if c.source == "Google"]
+        current_mirror = cfg.get("todo_mirror") or ""
+        if current_mirror and current_mirror not in [k for k, _ in mirror_opts]:
+            mirror_opts.append((current_mirror, "저장해 둔 캘린더 (아직 불러오지 못함)"))
+        self.mirror_opts = mirror_opts
+        self.mirror_cb = self.field("아이폰 기본 캘린더에도", ttk.Combobox(
+            self.frame, state="readonly", width=30, values=[label for _, label in mirror_opts]), stretch=False)
+        self.mirror_cb.current([k for k, _ in mirror_opts].index(current_mirror))
+        self.hint("Google Tasks를 쓸 때, 날짜 있는 할 일을 고른 캘린더에 일정으로 복사해서 아이폰 기본 캘린더에서도 보여요. "
+                  "'할 일' 캘린더를 따로 만들어 고르는 걸 권해요. 아이폰에서는 보기만 하세요(고치거나 지워도 다시 맞춰져요). "
+                  "Google 캘린더 웹에서는 할 일이 두 번 보일 수 있으니 그 캘린더의 체크를 꺼 두세요.")
+
+        def mirror_state(_e=None) -> None:
+            tasks = self.todo_sync_opts[max(0, self.todo_sync_cb.current())][0] == "tasks"
+            self.mirror_cb.state(["!disabled"] if tasks else ["disabled"])
+
+        self.todo_sync_cb.bind("<<ComboboxSelected>>", mirror_state, add="+")
+        mirror_state()
         self.rollover_var = tk.BooleanVar(value=bool(cfg.get("todo_rollover", True)))
         ttk.Checkbutton(self.frame, text="끝내지 못한 할 일은 달력에서 오늘로 넘겨 보여 주기",
                         variable=self.rollover_var).grid(row=self.row, column=0, columnspan=3, sticky="w", pady=(0, px(4)))
@@ -7046,6 +7239,7 @@ class SettingsDialog(_Dialog):
             "todo_sync": (lambda k: k[4:] if k.startswith("cal:") else "")(
                 self.todo_sync_opts[max(0, self.todo_sync_cb.current())][0]),
             "todo_rollover": bool(self.rollover_var.get()),
+            "todo_mirror": self.mirror_opts[max(0, self.mirror_cb.current())][0],
             "neis_key": self.neis_key_e.get().strip(),
             "font_style": self.font_opts[max(0, self.font_cb.current())][0],
             "timetable_url": self.timetable_e.get().strip(),
